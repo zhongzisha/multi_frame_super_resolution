@@ -36,5 +36,8 @@ int main()
     }
     cout << endl;
 
+    cv::namedWindow("image");
+    cv::imshow("image", im);
+
     return 0;
 }

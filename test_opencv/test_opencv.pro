@@ -7,8 +7,9 @@ SOURCES += \
         main.cpp
 
 
-INCLUDEPATH += "C:/msys64/mingw64/include/opencv4"
-LIBS += "C:/msys64/mingw64/lib/libopencv_core.dll.a"
-LIBS += "C:/msys64/mingw64/lib/libopencv_imgcodecs.dll.a"
-LIBS += "C:/msys64/mingw64/lib/libopencv_imgproc.dll.a"
-LIBS += "C:/msys64/mingw64/lib/libopencv_highgui.dll.a"
+INCLUDEPATH += "F:/opencv-4.5.1/build_release/install/include"
+LIBS += "F:/opencv-4.5.1/build_release/install/x64/vc16/lib/opencv_core451.lib"
+LIBS += "F:/opencv-4.5.1/build_release/install/x64/vc16/lib/opencv_imgcodecs451.lib"
+LIBS += "F:/opencv-4.5.1/build_release/install/x64/vc16/lib/opencv_highgui451.lib"
+LIBS += "F:/opencv-4.5.1/build_release/install/x64/vc16/lib/opencv_imgproc451.lib"
+LIBS += "F:/opencv-4.5.1/build_release/install/x64/vc16/lib/opencv_ccalib451.lib"

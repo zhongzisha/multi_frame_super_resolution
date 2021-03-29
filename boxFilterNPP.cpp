@@ -44,6 +44,7 @@
 #include <cmath>
 
 #include <cuda_runtime.h>
+#include <cufft.h>
 #include <npp.h>
 
 #include <helper_cuda.h>
@@ -96,6 +97,73 @@ std::vector<float> gaussin_filter_1D(float sigma) {
     }
     return ret;
 }
+
+
+class PreAlignment {
+public:
+    Npp32f* d_inputImg;
+    int inputImg_width;
+    int inputImg_height;
+    int inputImg_channels;
+    int inputImg_step;
+    int inputImg_pitch;
+
+    Npp32f* d_imgToTrackRotated;
+    float2* d_imgToTrackCplx;
+    float2* d_imgRefCplx;
+    byte* d_buffer;
+    int* d_x;
+    int* d_y;
+    float* d_val;
+
+    cufftHandle* d_plan;
+    byte* d_bufferFFT;
+    
+    int width;
+    int height;
+    size_t FFTBufferSize;
+    float highPass;
+    bool memoryAllocated = false;
+
+    void AllocateDeviceMemory() {
+        int fftWidth = width / 2 + 1;
+        cudaMalloc(&d_imgToTrackCplx, sizeof(float2) * fftWidth * height);
+        cudaMalloc(&d_imgRefCplx, sizeof(float2) * fftWidth * height);
+        cudaMalloc(&d_x, sizeof(int));
+        cudaMalloc(&d_y, sizeof(int));
+        cudaMalloc(&d_val, sizeof(float));
+
+        cudaMalloc(&d_bufferFFT, sizeof(byte) * FFTBufferSize);
+
+        int maxBufferSize;
+        NppiSize oSizeROI = { inputImg_width, inputImg_height };
+        nppiMaxIndxGetBufferHostSize_32f_C1R(oSizeROI, &maxBufferSize);
+        int maxBufferSize2;
+        nppiMinMaxGetBufferHostSize_32f_C1R(oSizeROI, &maxBufferSize2);
+        maxBufferSize = MAX(maxBufferSize, maxBufferSize2);
+        cudaMalloc(&d_buffer, sizeof(byte) * maxBufferSize);
+
+        memoryAllocated = true;
+    }
+
+    PreAlignment(Npp32f* inputImg_,
+        int inputImg_width_,
+        int inputImg_height_,
+        int inputImg_channels_,
+        int inputImg_step_,
+        int inputImg_pitch_) {
+        d_inputImg = inputImg_;
+        inputImg_width = inputImg_width_;
+        inputImg_height = inputImg_height_;
+        inputImg_channels = inputImg_channels_;
+        inputImg_step = inputImg_step_;
+        inputImg_pitch = inputImg_pitch_;
+        
+
+    }
+
+    
+};
 
 
 int main(int argc, char *argv[]) {
