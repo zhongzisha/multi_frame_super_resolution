@@ -7,9 +7,12 @@ using namespace std;
 #include <opencv2/highgui.hpp>
 #include <opencv2/dnn_superres.hpp>
 #include <opencv2/superres.hpp>
+#include <opencv2/cudawarping.hpp>
+#include <opencv2/cudaarithm.hpp>
 
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
+#include <cufft.h>
 
 #include <npp.h>
 #include <nppcore.h>
@@ -32,6 +35,8 @@ using namespace std;
 #include <npps_initialization.h>
 #include <npps_statistics_functions.h>
 #include <npps_support_functions.h>
+
+#include <Eigen/Core>
 
 #include <stdio.h>
 
@@ -383,6 +388,7 @@ vector<float> gaussin_filter_1D(float sigma) {
     return ret;
 }
 
+//测试NPP的图像旋转函数
 void test_npp_rotate() {
 
     //读取图片
@@ -488,33 +494,14 @@ void test_npp_rotate() {
     cudaDeviceReset();
 }
 
-/*
-// rect is the RotatedRect (I got it from a contour...)
-        RotatedRect rect;
-        // matrices we'll use
-        Mat M, rotated, cropped;
-        // get angle and size from the bounding box
-        float angle = rect.angle;
-        Size rect_size = rect.size;
-        // thanks to http://felix.abecassis.me/2011/10/opencv-rotation-deskewing/
-        if (rect.angle < -45.) {
-            angle += 90.0;
-            swap(rect_size.width, rect_size.height);
-        }
-        // get the rotation matrix
-        M = getRotationMatrix2D(rect.center, angle, 1.0);
-        // perform the affine transformation
-        warpAffine(src, rotated, M, src.size(), INTER_CUBIC);
-        // crop the resulting image
-        getRectSubPix(rotated, rect_size, rect.center, cropped);
-*/
-
+//显示图片
 void showImg(const cv::Mat& mat, const std::string& title) {
     cv::namedWindow(title);
     cv::imshow(title, mat);
     cv::waitKey();
 }
 
+//从src中截取一个RotatedRect图像块
 cv::Mat cropImg(const cv::Mat& src, int cx, int cy, int w, int h, float angle) {
     cv::Point2f center(static_cast<float>(cx),
                        static_cast<float>(cy));
@@ -544,6 +531,7 @@ cv::Mat sharpenImg(const cv::Mat& src) {
     return sharpened;
 }
 
+// Laplacian Sharpen算法
 cv::Mat sharpenImg2(const cv::Mat& img)
 {
     cv::Mat result;
@@ -575,8 +563,8 @@ cv::Mat sharpenImg2(const cv::Mat& img)
     return result;
 }
 
+// 使用OpenCV自带的DNN超分辨算法进行超分辨率
 void dnn_sr(int argc, char** argv) {
-    // 使用OpenCV自带的超分辨算法进行超分辨率
     std::string algo = string(argv[1]);
     std::string model_path = string(argv[2]);
     std::cout << algo << ", " << model_path << "\n";
@@ -623,7 +611,7 @@ MultiFrameSource_CUDA::MultiFrameSource_CUDA(const std::vector<cv::cuda::GpuMat>
 void MultiFrameSource_CUDA::nextFrame(cv::OutputArray _frame)
 {
     if (index_ >= 0 && index_ < frames_.size()) {
-        frames_[index_++].copyTo(_frame.getGpuMatRef());
+        frames_[index_++].copyTo(_frame.getGpuMatRef());//这里默认是GpuMat
     } else {
         _frame.release();
     }
@@ -636,12 +624,12 @@ void MultiFrameSource_CUDA::reset()
 
 //OpenCV度量时间函数
 #define MEASURE_TIME(op) \
-    { \
-        cv::TickMeter tm; \
-        tm.start(); \
-        op; \
-        tm.stop(); \
-        cout << tm.getTimeSec() << " sec" << endl; \
+{ \
+    cv::TickMeter tm; \
+    tm.start(); \
+    op; \
+    tm.stop(); \
+    cout << tm.getTimeSec() << " sec" << endl; \
     }
 
 static cv::Ptr<cv::superres::DenseOpticalFlowExt> createOptFlow(const string& name, bool useGpu)
@@ -672,6 +660,7 @@ static cv::Ptr<cv::superres::DenseOpticalFlowExt> createOptFlow(const string& na
     return cv::Ptr<cv::superres::DenseOpticalFlowExt>();
 }
 
+// OpenCV里面的视频超分辨率算法，多帧超分辨率算法
 void cv_mfsr(int argc, char** argv) {
 
     std::string optFlowName = string(argv[1]);
@@ -693,7 +682,7 @@ void cv_mfsr(int argc, char** argv) {
 
     superRes->setOpticalFlow(opticalflow);
     superRes->setScale(scale);
-    superRes->setIterations(1);
+    superRes->setIterations(100);
     superRes->setTemporalAreaRadius(1);
     cv::Ptr<cv::superres::FrameSource> frameSource =
             cv::makePtr<MultiFrameSource_CUDA>(frames);
@@ -725,6 +714,266 @@ void cv_mfsr(int argc, char** argv) {
     showImg(result, "sr_result.png");
     cv::imwrite("sr_result.png", result);
 }
+
+
+cv::Mat getApodizationWindow(int rows, int cols, int radius) {
+    int size = 2*radius;
+    float *hanning_window = new float[size];
+    for(int i=0; i<size;i++) {
+        hanning_window[i] = 0.5 - 0.5 * std::cos((2 * static_cast<double>(CV_PI) * i)/(size - 1));
+    }
+    cv::Mat a = cv::Mat::ones(rows, 1, CV_32F);
+    float* a_ptr = a.ptr<float>();
+    memcpy(&a_ptr[0], &hanning_window[0], radius*sizeof(float));
+    memcpy(&a_ptr[rows-radius], &hanning_window[radius], radius*sizeof(float));
+
+    cv::Mat b = cv::Mat::ones(1, cols, CV_32F);
+    float* b_ptr = b.ptr<float>();
+    memcpy(&b_ptr[0], &hanning_window[0], radius*sizeof(float));
+    memcpy(&b_ptr[cols-radius], &hanning_window[radius], radius*sizeof(float));
+
+    cv::Mat c = a*b;  //矩阵相乘, (rows x 1) * (1 x cols) = (rows x cols)
+    return c;
+}
+
+float* getHighPassFilter(int rows, int cols) {
+    float* filter = new float[rows*cols];
+    double row_step = CV_PI / static_cast<double>(rows);
+    double col_step = CV_PI / static_cast<double>(cols);
+    double t1, t2;
+    double PI_2 = -CV_PI / static_cast<double>(2);
+    for(int i=0;i<rows;i++) {
+        t1 = i*row_step + PI_2 ;
+        t1 *= t1;
+        for(int j=0;j<cols;j++) {
+            t2 = j*col_step + PI_2;
+            t2 *= t2;
+            t1 = std::cos(std::sqrt(t1 + t2));
+            t1 *= t1;
+            t1 = 1.0 - t1;
+            filter[i*cols+j] = t1;
+        }
+    }
+    return filter;
+}
+
+// 基于FFT的图像配准
+
+extern "C"
+__global__ void copy_R2C(float* rs, cufftDoubleComplex* cs, int N);
+
+void fft_image_registration(int argc, char** argv) {
+    bool debug = true;
+    cv::Mat im0 = cv::imread("F:/cuda-samples/Samples/testNPP/test_opencv/img_000002.png", cv::IMREAD_COLOR);
+    cv::Mat im1 = cv::imread("F:/cuda-samples/Samples/testNPP/test_opencv/img_000000.png", cv::IMREAD_COLOR);
+    cv::Mat gray0, gray1;
+    cv::cvtColor(im0, gray0, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(im1, gray1, cv::COLOR_BGR2GRAY);
+    cv::Mat gray0f, gray1f;
+    gray0.convertTo(gray0f, CV_32F, 1/255.0);
+    gray1.convertTo(gray1f, CV_32F, 1/255.0);
+    if(debug) {
+        showImg(gray0, "gray0");
+        showImg(gray1, "gray1");
+    }
+
+    int rows_ = im0.rows;
+    int cols_ = im0.cols;
+    int log_polar_size_ = std::max(rows_, cols_);
+    int logPolarrows_ = log_polar_size_;
+    int logPolarcols_ = log_polar_size_;
+    double logBase_ = std::exp(std::log(rows_ * 1.1 / 2.0) / std::max(rows_, cols_));//根据图像的宽高得到对数基底
+    float *scales = new float[logPolarcols_];
+    float ellipse_coefficient = (float)(rows_) / cols_;  //得到椭圆系数
+    for (int i = 0; i < logPolarcols_; i++)
+    {
+        scales[i] = std::pow(logBase_, i);  //向量中填充数值
+    }
+    float *scales_matrix = new float[logPolarrows_ * logPolarcols_];
+    for (int j = 0; j < logPolarrows_; j++) {
+        memcpy(&scales_matrix[j*logPolarcols_], scales, logPolarcols_*sizeof(float));
+    }
+
+    if (debug) {
+        std::cout << "scales_matrix: \n";
+        for(int i=0; i<5; i++) {
+            for(int j=0; j<5;j++) {
+                std::cout << scales_matrix[i*logPolarcols_+j] << ", ";
+            }
+            std::cout << "\n";
+        }
+    }
+
+    double angle_step = CV_PI / static_cast<double>(logPolarrows_);
+    float *angles_matrix = new float[logPolarrows_*logPolarcols_];
+    for (int i = 0; i < logPolarrows_; i++) {
+        //memset(&angles_matrix[i*logPolarcols_], -i*angle_step, logPolarcols_*sizeof(float));  // this is bad
+        for(int j =0; j<logPolarcols_;j++) {
+            angles_matrix[i*logPolarcols_+j] = -i*angle_step;
+        }
+    }
+
+    if (debug) {
+        std::cout << "angles_matrix: \n";
+        for(int i=0; i<5; i++) {
+            for(int j=0; j<5;j++) {
+                std::cout << angles_matrix[i*logPolarcols_+j] << ", ";
+            }
+            std::cout << "\n";
+        }
+    }
+
+    float center[2] = { cols_/2.0f, rows_/2.0f};  //中心
+    float *xMap = new float[logPolarrows_*logPolarcols_];
+    float *yMap = new float[logPolarrows_*logPolarcols_];
+    int index;
+    for (int i=0; i<logPolarrows_;i++) {
+        for (int j=0; j<logPolarcols_;j++) {
+            index = i*logPolarcols_+j;
+            xMap[index] = scales_matrix[index] * std::cosf(angles_matrix[index]) + center[0];
+            yMap[index] = scales_matrix[index] * std::sinf(angles_matrix[index]) + center[1];
+        }
+    }
+
+    cv::Mat border_mask_ = cv::Mat(rows_, cols_, CV_8UC1, cv::Scalar(255));
+    cv::Mat appodizationWindow = getApodizationWindow(rows_, cols_, (int)((0.12)*std::min(rows_, cols_)));
+    if (debug) {
+        std::cout << "appodizationWindow: \n";
+        float* data_ptr = appodizationWindow.ptr<float>();
+        for(int i=0; i<5; i++) {
+            for(int j=0; j<5;j++) {
+                std::cout << data_ptr[i*cols_+j] << ", ";
+            }
+            std::cout << "\n";
+        }
+    }
+
+    if (false) {
+        cv::Mat apodize0 = gray0f.mul(appodizationWindow);
+        cv::Mat apodize1 = gray1f.mul(appodizationWindow);
+        showImg(apodize0, "apodize0");
+        showImg(apodize1, "apodize1");
+    } else {
+        cv::cuda::GpuMat gray0f_g, gray1f_g;
+        cv::cuda::GpuMat appodizationWindow_g;
+        gray0f_g.upload(gray0f);
+        gray1f_g.upload(gray1f);
+        appodizationWindow_g.upload(appodizationWindow);
+
+        cv::cuda::GpuMat apodize0_g, apodize1_g;
+        cv::cuda::multiply(gray0f_g, appodizationWindow_g, apodize0_g); //矩阵element-wise相乘
+        cv::cuda::multiply(gray1f_g, appodizationWindow_g, apodize1_g);
+
+        //        cv::Mat apodize0, apodize1;
+        //        apodize0_g.download(apodize0);
+        //        apodize1_g.download(apodize1);
+        //        showImg(apodize0, "apodize0");
+        //        showImg(apodize1, "apodize1");
+
+        if (false) {//测试GpuMat的数据复制, OK! 说明
+            cv::Mat apodize0_copy = cv::Mat::zeros(rows_, cols_, CV_32FC1);
+            float* data_ptr_d = apodize0_g.ptr<float>();
+            float* data_ptr_h = apodize0_copy.ptr<float>();
+            cudaError_t cuda_result = cudaMemcpy(data_ptr_h, data_ptr_d, rows_*cols_*sizeof(float), cudaMemcpyDeviceToHost);
+            if (cuda_result != cudaSuccess) {
+                std::cout << "error in copy from device to host.\n";
+            } else {
+                showImg(apodize0_copy, "apodize0_copy");
+            }
+        }
+
+        //先测试对apodize0_g进行傅里叶变换
+        //cv::Mat apodize0_copy = cv::Mat::zeros(rows_, cols_, CV_32FC1);
+        float* data_ptr_d = apodize0_g.ptr<float>();
+        //float* data_ptr_h = apodize0_copy.ptr<float>();
+        //cudaMemcpy(data_ptr_h, data_ptr_d, rows_*cols_*sizeof(float), cudaMemcpyDeviceToHost);
+        cufftDoubleComplex *apodize0_g_c;
+        cufftDoubleComplex *apodize0_g_c_o; // 傅里叶变换的输出
+        cudaMalloc((void**)&apodize0_g_c, sizeof(cufftDoubleComplex)*rows_*cols_);
+        cudaMalloc((void**)&apodize0_g_c_o, sizeof(cufftDoubleComplex)*rows_*cols_);
+        copy_R2C(data_ptr_d, apodize0_g_c, rows_*cols_); //复制到complex数据里面 GPU端
+//        for(int i=0; i<rows_;i++) {
+//            for(int j=0;j<cols_;j++) {
+//                apodize0_g_c_o_h[i*cols_+j].x = static_cast<double>(data_ptr_h[i*cols_+j]);
+//                apodize0_g_c_o_h[i*cols_+j].y = 0.0;
+//            }
+//        }
+//        cudaMemcpy(apodize0_g_c, apodize0_g_c_o_h, sizeof(cufftDoubleComplex)*rows_*cols_, cudaMemcpyHostToDevice);
+
+        cufftHandle plan;
+        cufftPlan2d(&plan, rows_, cols_, CUFFT_Z2Z);
+        cufftExecZ2Z(plan, apodize0_g_c, apodize0_g_c_o, CUFFT_FORWARD);
+
+        //这里执行fftshift
+        int block_rows = rows_/2;
+        int block_cols = cols_/2;
+
+        cufftDoubleComplex *apodize0_g_c_o_h = new cufftDoubleComplex[rows_*cols_]; // 傅里叶变换的输出的Host端存储
+        cudaMemcpy(apodize0_g_c_o_h, apodize0_g_c_o, sizeof(cufftDoubleComplex)*rows_*cols_, cudaMemcpyDeviceToHost);
+        if (debug){
+            std::cout << "apodize0 after fft: \n";
+            for(int i=0; i<5;i++) {
+                for(int j=0; j<5;j++) {
+                    const cufftDoubleComplex& temp = apodize0_g_c_o_h[i*cols_+j];
+                    std::cout << "(" << temp.x << ", " << temp.y << "), ";
+                }
+                std::cout << "\n";
+            }
+            std::cout << "apodize0 after fft: \n";
+            for(int i=block_rows; i<(block_rows+5);i++) {
+                for(int j=block_cols; j<(block_cols+5);j++) {
+                    const cufftDoubleComplex& temp = apodize0_g_c_o_h[i*cols_+j];
+                    std::cout << "(" << temp.x << ", " << temp.y << "), ";
+                }
+                std::cout << "\n";
+            }
+        }
+
+        delete[] apodize0_g_c_o_h;
+        cudaFree(apodize0_g_c);
+        cudaFree(apodize0_g_c_o);
+        cufftDestroy(plan);
+
+    }
+
+    float* highPassFilter = getHighPassFilter(rows_, cols_);
+
+    if (debug){
+        std::cout << "highPassFilter: \n";
+        for(int i=0; i<5; i++) {
+            for(int j=0; j<5;j++) {
+                std::cout << highPassFilter[i*cols_+j] << ", ";
+            }
+            std::cout << "\n";
+        }
+    }
+
+    // 对apodize0和apodize1做fft，然后fftShift，然后
+
+
+    // release
+    delete[] scales_matrix;
+    delete[] scales;
+    delete[] angles_matrix;
+    delete[] xMap;
+    delete[] yMap;
+    delete[] highPassFilter;
+
+}
+
+//测试Eigen的Complex的cwiseAbs是求模值还是求绝对值
+void test_eigen() {
+    typedef Eigen::Matrix<std::complex<double>, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> ComplexMatrix;
+    ComplexMatrix A(2, 2);
+    A(0, 0) = std::complex<double>(1.0, 1.0);
+    A(0, 1) = std::complex<double>(2.0, 2.0);
+    A(1, 0) = std::complex<double>(3.0, 3.0);
+    A(1, 1) = std::complex<double>(4.0, 4.0);
+    std::cout << A << "\n";
+    std::cout << A.cwiseAbs() << "\n";  //如果是complex，则是求sqrt(x.^2 + y.^2)
+}
+
+
 
 int main(int argc, char** argv){
     float SigmaDebayerTracking =0.5f;
@@ -791,12 +1040,25 @@ int main(int argc, char** argv){
         dnn_sr(argc, argv);
     }
 
-    if (true) {
+    if (false) {// OpenCV的多帧超分辨率
         cv_mfsr(argc, argv);
+    }
+
+    if (true) { // FFT的图像配准
+        fft_image_registration(argc, argv);
+    }
+
+    if (false) { //测试Eigen
+        test_eigen();
     }
 
     return 0;
 }
+
+
+
+
+
 
 
 

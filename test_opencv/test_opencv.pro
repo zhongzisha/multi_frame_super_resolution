@@ -7,6 +7,8 @@ SOURCES += \
         main.cpp
 
 
+INCLUDEPATH += "F:/softwares/install/include/"
+INCLUDEPATH += "F:/softwares/install/include/eigen3"
 INCLUDEPATH += "F:/opencv-4.5.1/build_release/install/include"
 INCLUDEPATH += "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v10.2/include"
 LIBS += "F:/opencv-4.5.1/build_release/install/x64/vc16/lib/opencv_core451.lib"
@@ -60,7 +62,8 @@ kernel.cu \
 opticalFlow.cu
 
 DISTFILES += \
-    build.bat
+    build.bat \
+    myKernels.cu
 
 
 
