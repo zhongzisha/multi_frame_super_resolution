@@ -759,9 +759,9 @@ float* getHighPassFilter(int rows, int cols) {
 
 // 基于FFT的图像配准
 
-extern "C"
-__global__ void copy_R2C(float* rs, cufftDoubleComplex* cs, int N);
-
+extern "C" void copy_R2C(float* rs, cufftDoubleComplex* cs, int N);
+extern "C" void fftshift_2D(cufftDoubleComplex* cs, int width, int height);
+extern "C" void fftshift_2D_new(cufftDoubleComplex* cs, int width, int height);
 void fft_image_registration(int argc, char** argv) {
     bool debug = true;
     cv::Mat im0 = cv::imread("F:/cuda-samples/Samples/testNPP/test_opencv/img_000002.png", cv::IMREAD_COLOR);
@@ -891,6 +891,7 @@ void fft_image_registration(int argc, char** argv) {
         cufftDoubleComplex *apodize0_g_c_o; // 傅里叶变换的输出
         cudaMalloc((void**)&apodize0_g_c, sizeof(cufftDoubleComplex)*rows_*cols_);
         cudaMalloc((void**)&apodize0_g_c_o, sizeof(cufftDoubleComplex)*rows_*cols_);
+        cufftDoubleComplex *apodize0_g_c_o_h = new cufftDoubleComplex[rows_*cols_]; // 傅里叶变换的输出的Host端存储
         copy_R2C(data_ptr_d, apodize0_g_c, rows_*cols_); //复制到complex数据里面 GPU端
 //        for(int i=0; i<rows_;i++) {
 //            for(int j=0;j<cols_;j++) {
@@ -904,13 +905,8 @@ void fft_image_registration(int argc, char** argv) {
         cufftPlan2d(&plan, rows_, cols_, CUFFT_Z2Z);
         cufftExecZ2Z(plan, apodize0_g_c, apodize0_g_c_o, CUFFT_FORWARD);
 
-        //这里执行fftshift
-        int block_rows = rows_/2;
-        int block_cols = cols_/2;
-
-        cufftDoubleComplex *apodize0_g_c_o_h = new cufftDoubleComplex[rows_*cols_]; // 傅里叶变换的输出的Host端存储
-        cudaMemcpy(apodize0_g_c_o_h, apodize0_g_c_o, sizeof(cufftDoubleComplex)*rows_*cols_, cudaMemcpyDeviceToHost);
         if (debug){
+            cudaMemcpy(apodize0_g_c_o_h, apodize0_g_c_o, sizeof(cufftDoubleComplex)*rows_*cols_, cudaMemcpyDeviceToHost);
             std::cout << "apodize0 after fft: \n";
             for(int i=0; i<5;i++) {
                 for(int j=0; j<5;j++) {
@@ -919,14 +915,45 @@ void fft_image_registration(int argc, char** argv) {
                 }
                 std::cout << "\n";
             }
-            std::cout << "apodize0 after fft: \n";
-            for(int i=block_rows; i<(block_rows+5);i++) {
-                for(int j=block_cols; j<(block_cols+5);j++) {
+
+            FILE *fp = fopen("cufft_result.txt", "w");
+            for(int i=0; i<rows_;i++) {
+                for(int j=0; j<cols_;j++) {
+                    const cufftDoubleComplex& temp = apodize0_g_c_o_h[i*cols_+j];
+                    fprintf(fp, "[%.6f, %.6f], ", temp.x, temp.y);
+                }
+                fprintf(fp, "\n");
+            }
+            fclose(fp);
+        }
+
+        //这里执行fftshift
+        //fftshift_2D(apodize0_g_c_o, cols_, rows_);
+        fftshift_2D_new(apodize0_g_c_o, cols_, rows_);  // OK
+
+        int block_rows = rows_/2;
+        int block_cols = cols_/2;
+
+        if (debug){
+            cudaMemcpy(apodize0_g_c_o_h, apodize0_g_c_o, sizeof(cufftDoubleComplex)*rows_*cols_, cudaMemcpyDeviceToHost);
+            std::cout << "apodize0 after fftshift: \n";
+            for(int i=block_rows; i<block_rows+5;i++) {
+                for(int j=block_cols; j<block_cols+5;j++) {
                     const cufftDoubleComplex& temp = apodize0_g_c_o_h[i*cols_+j];
                     std::cout << "(" << temp.x << ", " << temp.y << "), ";
                 }
                 std::cout << "\n";
             }
+
+            FILE *fp = fopen("cufft_shift_result.txt", "w");
+            for(int i=0; i<rows_;i++) {
+                for(int j=0; j<cols_;j++) {
+                    const cufftDoubleComplex& temp = apodize0_g_c_o_h[i*cols_+j];
+                    fprintf(fp, "[%.6f, %.6f], ", temp.x, temp.y);
+                }
+                fprintf(fp, "\n");
+            }
+            fclose(fp);
         }
 
         delete[] apodize0_g_c_o_h;
