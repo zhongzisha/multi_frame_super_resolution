@@ -3,6 +3,7 @@
 using namespace std;
 
 #include <opencv2/opencv.hpp>
+#include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/dnn_superres.hpp>
@@ -1270,7 +1271,7 @@ void test_defog() {
 
     cv::Mat Iper = cv::imread("F:/wy/ImageWorst_tiff16.tiff", cv::IMREAD_ANYCOLOR|cv::IMREAD_ANYDEPTH);
     cv::Mat Ipar = cv::imread("F:/wy/ImageBest_tiff16.tiff", cv::IMREAD_ANYCOLOR|cv::IMREAD_ANYDEPTH);
-    int num_images = 16;
+    int num_images = 1;
     cv::TickMeter tm;
     tm.start();
     for(int image_id=0; image_id<num_images; image_id++) {
@@ -1337,7 +1338,7 @@ void test_defog() {
         sum_by_indices(Iper_ptr, Idx_ptr, num_pixels, cols, rows, 3, Iper_infi_sum);
         sum_by_indices(Ipar_ptr, Idx_ptr, num_pixels, cols, rows, 3, Ipar_infi_sum);
 
-        float beta = 1.55f;
+        float beta = 1.0f; //1.55f;
         float P[3], Ainfi[3];
         for(int i=0; i<3;i++) {
             P[i] = beta * (Iper_infi_sum[i] - Ipar_infi_sum[i]) / (Iper_infi_sum[i] + Ipar_infi_sum[i]);
@@ -1354,11 +1355,20 @@ void test_defog() {
             Itotal[i] = Iper_vec[i] + Ipar_vec[i];
             t_vec[i] = 1.0 - A_vec[i] / Ainfi[i];
             R_vec[i] = (Itotal[i] - A_vec[i]) / t_vec[i];
+            //cv::normalize(R_vec[i], R_vec[i], 1, 0, cv::NORM_MINMAX);
         }
         cv::Mat A, t, R;
         cv::merge(A_vec, A);
         cv::merge(t_vec, t);
         cv::merge(R_vec, R);
+
+        double minVal, maxVal;
+        cv::minMaxLoc(A, &minVal, &maxVal);
+        std::cout << "A(minmax) is " << minVal << ", " << maxVal << "\n";
+        cv::minMaxLoc(t, &minVal, &maxVal);
+        std::cout << "t(minmax) is " << minVal << ", " << maxVal << "\n";
+        cv::minMaxLoc(R, &minVal, &maxVal);
+        std::cout << "R(minmax) is " << minVal << ", " << maxVal << "\n";
 
         if (debug) {
             std::cout << Iper_infi_sum[0] << ", " << Iper_infi_sum[1] << ", " << Iper_infi_sum[2] << "\n";
@@ -1368,6 +1378,205 @@ void test_defog() {
             showImg(A, "A");
             showImg(t, "t");
             showImg(R, "R");
+        }
+
+        if(image_id == num_images - 1) {
+
+            double minVal, maxVal;
+            cv::minMaxLoc(R, &minVal, &maxVal);
+            std::cout << minVal << ", " << maxVal << "\n";
+            showImg(R, "R");
+//            cv::Mat R1;
+//            cv::normalize(R, R1, 1, 0, cv::NORM_MINMAX);
+//            {
+//                std::cout << "R1:\n";
+//                float* R1_ptr = R1.ptr<float>();
+//                for(int i=0; i<5; i++) {
+//                    for(int j=0; j<5;j++) {
+//                        int index = i*cols*3+j*3;
+//                        std::cout << "(" << R1_ptr[index] << ", " << R1_ptr[index+1] << ", " << R1_ptr[index+2] << ") ";
+//                    }
+//                    std::cout << "\n";
+//                }
+//            }
+//            R1.convertTo(R1, CV_8UC3, 255.0);
+//            cv::imwrite("R.png", R1);
+            cv::Mat tmp;
+            R.convertTo(tmp, CV_8U, 255., 0.);
+            cv::Mat finalImg;
+            cv::cvtColor(tmp, finalImg, cv::COLOR_BGRA2BGR);
+            cv::imwrite("R.png", finalImg);
+        }
+    }
+    tm.stop();
+    std::cout << tm.getTimeSec() << " sec" << std::endl;
+    std::cout << static_cast<double>(num_images) / tm.getTimeSec() << " FPS" << std::endl;
+}
+
+extern "C" void defog_cuda(float* Iper, float* Ipar, int width, int height,
+                float* A, float *t, float *R, float *P, float *Ainfi);
+void test_defog_cuda() {
+    bool debug = true;
+
+
+    cv::Mat Iper = cv::imread("F:/wy/ImageWorst_tiff16.tiff", cv::IMREAD_ANYCOLOR|cv::IMREAD_ANYDEPTH);
+    cv::Mat Ipar = cv::imread("F:/wy/ImageBest_tiff16.tiff", cv::IMREAD_ANYCOLOR|cv::IMREAD_ANYDEPTH);
+    int num_images = 1;
+    cv::TickMeter tm;
+    tm.start();
+    for(int image_id=0; image_id<num_images; image_id++) {
+        Iper.convertTo(Iper, CV_32FC3, 1/65535.0);
+        Ipar.convertTo(Ipar, CV_32FC3, 1/65535.0);
+        cv::cuda::GpuMat Iper_g, Ipar_g;
+        Iper_g.upload(Iper);
+        Ipar_g.upload(Ipar);
+
+        cv::cuda::GpuMat Iper_dc_g;
+        //cv::cuda::GpuMat Ipar_dc_g;
+        dark_prior(Iper_g, 12, Iper_dc_g);
+        //dark_prior(Ipar_g, 12, Ipar_dc_g);
+
+        cv::Mat Iper_dc;
+        Iper_dc_g.download(Iper_dc);
+        //Ipar_dc_g.download(Ipar_dc);
+
+        if (debug) {
+            showImg(Iper_dc, "Iper_dc");
+            //showImg(Ipar_dc, "Ipar_dc");
+        }
+
+        if (debug) {
+            float *Iper_dc_ptr = Iper_dc.ptr<float>();
+            FILE *fp = fopen("Iper_dc.txt", "w");
+            for(int i=0; i<Iper_dc.rows; i++) {
+                for(int j=0; j<Iper_dc.cols;j++) {
+                    fprintf(fp, "%.6f, ", Iper_dc_ptr[i*Iper_dc.cols+j]);
+                }
+                fprintf(fp, "\n");
+            }
+            fclose(fp);
+        }
+
+        float percent = 0.005;
+        int rows = Iper.rows;
+        int cols = Iper.cols;
+        int num_pixels = percent * rows * cols;
+        //std::cout << "num_pixels = " << num_pixels << "\n";
+        cv::Mat dark_temp = Iper_dc.reshape(1, 1); //一行的矩阵
+        cv::Mat Idx;
+        cv::sortIdx(dark_temp, Idx, cv::SORT_EVERY_ROW + cv::SORT_DESCENDING);
+        int *Idx_ptr = Idx.ptr<int>();
+
+        if (debug) {
+            cv::Mat mask = cv::Mat::zeros(rows, cols, CV_32FC1);
+            std::cout << Idx.type() << "\n";
+
+            float* mask_ptr = mask.ptr<float>();
+            for(int i=0; i<num_pixels;i++) {
+                int row = Idx_ptr[i]/cols;
+                int col = Idx_ptr[i]%cols;
+                mask_ptr[row*cols+col] = 1;
+                std::cout << i << ": " << Idx_ptr[i] << "\n";
+            }
+            showImg(mask, "mask");
+        }
+
+        float *Iper_ptr = Iper.ptr<float>();
+        float *Ipar_ptr = Ipar.ptr<float>();
+        float Iper_infi_sum[3] = {0};
+        float Ipar_infi_sum[3] = {0};
+        sum_by_indices(Iper_ptr, Idx_ptr, num_pixels, cols, rows, 3, Iper_infi_sum);
+        sum_by_indices(Ipar_ptr, Idx_ptr, num_pixels, cols, rows, 3, Ipar_infi_sum);
+
+        float beta = 1.55f;
+        float P[3], Ainfi[3];
+        for(int i=0; i<3;i++) {
+            P[i] = beta * (Iper_infi_sum[i] - Ipar_infi_sum[i]) / (Iper_infi_sum[i] + Ipar_infi_sum[i]);
+            Ainfi[i] = (Iper_infi_sum[i] + Ipar_infi_sum[i]) / num_pixels;
+        }
+
+        if (false) {
+            cv::Mat Iper_vec[3], Ipar_vec[3], Itotal[3];
+            cv::split(Iper, Iper_vec);
+            cv::split(Ipar, Ipar_vec);
+            std::vector<cv::Mat> A_vec(3), t_vec(3), R_vec(3);
+            for (int i=0; i<3; i++) {
+                A_vec[i] = (Iper_vec[i] - Ipar_vec[i])/P[i];
+                Itotal[i] = Iper_vec[i] + Ipar_vec[i];
+                t_vec[i] = 1.0 - A_vec[i] / Ainfi[i];
+                R_vec[i] = (Itotal[i] - A_vec[i]) / t_vec[i];
+            }
+            cv::Mat A, t, R;
+            cv::merge(A_vec, A);
+            cv::merge(t_vec, t);
+            cv::merge(R_vec, R);
+
+            if (debug) {
+                std::cout << Iper_infi_sum[0] << ", " << Iper_infi_sum[1] << ", " << Iper_infi_sum[2] << "\n";
+                std::cout << Ipar_infi_sum[0] << ", " << Ipar_infi_sum[1] << ", " << Ipar_infi_sum[2] << "\n";
+                std::cout << P[0] << ", " << P[1] << ", " << P[2] << "\n";
+                std::cout << Ainfi[0] << ", " << Ainfi[1] << ", " << Ainfi[2] << "\n";
+                showImg(A, "A");
+                showImg(t, "t");
+                showImg(R, "R");
+            }
+        }
+        else {
+            cv::cuda::GpuMat A_g(rows, cols, CV_32FC3);
+            cv::cuda::GpuMat t_g(rows, cols, CV_32FC3);
+            cv::cuda::GpuMat R_g(rows, cols, CV_32FC3);
+
+            float *Iper_g_data = Iper_g.ptr<float>();
+            float *Ipar_g_data = Ipar_g.ptr<float>();
+            float *A_g_data = A_g.ptr<float>();
+            float *t_g_data = t_g.ptr<float>();
+            float *R_g_data = R_g.ptr<float>();
+            float *P_g_data, *Ainfi_g_data;
+            cudaMalloc((void**)&P_g_data, 3*sizeof(float));
+            cudaMalloc((void**)&Ainfi_g_data, 3*sizeof(float));
+            cudaMemcpy(P_g_data, P, 3*sizeof(float), cudaMemcpyHostToDevice);
+            cudaMemcpy(Ainfi_g_data, Ainfi, 3*sizeof(float), cudaMemcpyHostToDevice);
+            defog_cuda(Iper_g_data, Ipar_g_data, cols, rows, A_g_data, t_g_data, R_g_data, P_g_data, Ainfi_g_data);
+            cudaFree(P_g_data);
+            cudaFree(Ainfi_g_data);
+
+            if (debug) {
+                cv::Mat A, t, R;
+                A_g.download(A);
+                t_g.download(t);
+                R_g.download(R);
+                showImg(A, "A");
+                showImg(t, "t");
+                showImg(R, "R");
+            }
+
+            if(image_id == num_images - 1) {
+                cv::Mat R;
+                R_g.download(R);
+                showImg(R, "R");
+    //            cv::Mat R1;
+    //            cv::normalize(R, R1, 1, 0, cv::NORM_MINMAX);
+    //            {
+    //                std::cout << "R1:\n";
+    //                float* R1_ptr = R1.ptr<float>();
+    //                for(int i=0; i<5; i++) {
+    //                    for(int j=0; j<5;j++) {
+    //                        int index = i*cols*3+j*3;
+    //                        std::cout << "(" << R1_ptr[index] << ", " << R1_ptr[index+1] << ", " << R1_ptr[index+2] << ") ";
+    //                    }
+    //                    std::cout << "\n";
+    //                }
+    //            }
+    //            R1.convertTo(R1, CV_8UC3, 255.0);
+    //            cv::imwrite("R.png", R1);
+                cv::Mat tmp;
+                R.convertTo(tmp, CV_8U, 255., 0.);
+                cv::Mat finalImg;
+                cv::cvtColor(tmp, finalImg, cv::COLOR_BGRA2BGR);
+                cv::imwrite("R_gpu.png", finalImg);
+
+            }
+
         }
     }
     tm.stop();
@@ -1456,6 +1665,7 @@ int main(int argc, char** argv){
 
     if (true) {// 去雾
         test_defog();
+        //test_defog_cuda();
     }
 
     return 0;
