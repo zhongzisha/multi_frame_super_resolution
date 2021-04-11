@@ -53,13 +53,13 @@ LIBS += "F:/opencv-4.5.1/build_release/install/x64/vc16/lib/opencv_world451.lib"
 #QMAKE_EXTRA_UNIX_COMPILERS += cuda
 
 
-# This makes the .cu files appear in your project
-OTHER_FILES +=  \
-DeBayerKernels.cu \
-RobustnessModell.cu \
-ShiftMinimizerKernels.cu \
-kernel.cu \
-opticalFlow.cu
+## This makes the .cu files appear in your project
+#OTHER_FILES +=  \
+#DeBayerKernels.cu \
+#RobustnessModell.cu \
+#ShiftMinimizerKernels.cu \
+#kernel.cu \
+#opticalFlow.cu
 
 DISTFILES += \
     build.bat \

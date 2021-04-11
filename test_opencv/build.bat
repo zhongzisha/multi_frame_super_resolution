@@ -19,5 +19,5 @@ cl -I "%COMMON_INSTALL%/include" ^
 -I "%COMMON_INSTALL%/include/eigen3" ^
 -I "%OPENCV_PATH%/include" ^
 -I "%CUDA_PATH%/include" ^
-main.cpp /link kernel.obj myKernels.obj ^
+main.cpp /link myKernels.obj ^
 %OPENCV_LIBS% %CUDA_LIBS% %NPP_LIBS%

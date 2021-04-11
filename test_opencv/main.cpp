@@ -738,8 +738,8 @@ cv::Mat getApodizationWindow(int rows, int cols, int radius) {
 
 float* getHighPassFilter(int rows, int cols) {
     float* filter = new float[rows*cols];
-    double row_step = CV_PI / static_cast<double>(rows);
-    double col_step = CV_PI / static_cast<double>(cols);
+    double row_step = CV_PI / static_cast<double>(rows-1);
+    double col_step = CV_PI / static_cast<double>(cols-1);
     double t1, t2;
     double PI_2 = -CV_PI / static_cast<double>(2);
     for(int i=0;i<rows;i++) {
@@ -748,20 +748,114 @@ float* getHighPassFilter(int rows, int cols) {
         for(int j=0;j<cols;j++) {
             t2 = j*col_step + PI_2;
             t2 *= t2;
-            t1 = std::cos(std::sqrt(t1 + t2));
-            t1 *= t1;
-            t1 = 1.0 - t1;
-            filter[i*cols+j] = t1;
+            t2 = std::cos(std::sqrt(t1 + t2));
+            t2 *= t2;
+            t2 = 1.0 - t2;
+            filter[i*cols+j] = t2;
         }
     }
     return filter;
 }
 
 // 基于FFT的图像配准
-
-extern "C" void copy_R2C(float* rs, cufftDoubleComplex* cs, int N);
+extern "C" void copy_R2C(float* rs, cufftDoubleComplex* cs, int N);\
 extern "C" void fftshift_2D(cufftDoubleComplex* cs, int width, int height);
-extern "C" void fftshift_2D_new(cufftDoubleComplex* cs, int width, int height);
+extern "C" void high_pass_filtering(cufftDoubleComplex* input, float *output, int width, int height);
+extern "C" void crossPowerSpectrum(cufftDoubleComplex* f1, cufftDoubleComplex* f2, int width, int height);
+extern "C" void abs_and_normby(cufftDoubleComplex* f1, float* output, double normby, int width, int height);
+void fftreg_phaseCorrelate(cv::cuda::GpuMat& im0,
+                           cv::cuda::GpuMat& im1,
+                           double& row,
+                           double& col) {
+    bool debug = true;
+    int rows_ = im0.rows;
+    int cols_ = im0.cols;
+    //先测试对apodize0_g进行傅里叶变换
+    //cv::Mat apodize0_copy = cv::Mat::zeros(rows_, cols_, CV_32FC1);
+    float* data_ptr_d0 = im0.ptr<float>();
+    float* data_ptr_d1 = im1.ptr<float>();
+    //float* data_ptr_h = apodize0_copy.ptr<float>();
+    //cudaMemcpy(data_ptr_h, data_ptr_d0, rows_*cols_*sizeof(float), cudaMemcpyDeviceToHost);
+    cufftDoubleComplex *im0_g_c, *im1_g_c;
+    cufftDoubleComplex *im0_g_c_o, *im1_g_c_o; // 傅里叶变换的输出
+    cudaMalloc((void**)&im0_g_c, sizeof(cufftDoubleComplex)*rows_*cols_);
+    cudaMalloc((void**)&im0_g_c_o, sizeof(cufftDoubleComplex)*rows_*cols_);
+    cudaMalloc((void**)&im1_g_c, sizeof(cufftDoubleComplex)*rows_*cols_);
+    cudaMalloc((void**)&im1_g_c_o, sizeof(cufftDoubleComplex)*rows_*cols_);
+    copy_R2C(data_ptr_d0, im0_g_c, rows_*cols_); //复制到complex数据里面 GPU端
+    copy_R2C(data_ptr_d1, im1_g_c, rows_*cols_); //复制到complex数据里面 GPU端
+
+    cufftHandle plan;
+    cufftPlan2d(&plan, rows_, cols_, CUFFT_Z2Z);
+    cufftExecZ2Z(plan, im0_g_c, im0_g_c_o, CUFFT_FORWARD);//执行FFT
+    cufftExecZ2Z(plan, im1_g_c, im1_g_c_o, CUFFT_FORWARD);//执行FFT
+
+    crossPowerSpectrum(im0_g_c_o, im1_g_c_o, cols_, rows_); //结果存在im0_g_c_o里面了
+
+    if (debug) {
+        std::cout << "check cross ps:\n";
+        cufftDoubleComplex *im0_g_c_o_h = new cufftDoubleComplex[rows_*cols_];
+        cudaMemcpy(im0_g_c_o_h, im0_g_c_o, sizeof(cufftDoubleComplex)*rows_*cols_, cudaMemcpyDeviceToHost);
+        for(int i=0; i<5;i++) {
+            for(int j=0; j<5;j++) {
+                const cufftDoubleComplex& temp = im0_g_c_o_h[i*cols_+j];
+                std::cout << "(" << temp.x << "," << temp.y << "), ";
+            }
+            std::cout << "\n";
+        }
+        delete[] im0_g_c_o_h;
+    }
+
+    cufftExecZ2Z(plan, im0_g_c_o, im0_g_c, CUFFT_INVERSE);//执行FFT逆变换
+
+    fftshift_2D(im0_g_c, cols_, rows_);  // OK
+
+    float *abs_g_data;
+    cudaMalloc((void**)&abs_g_data, sizeof(float)*rows_*cols_);
+    abs_and_normby(im0_g_c, abs_g_data, static_cast<double>(rows_*cols_), cols_, rows_);
+
+    cv::cuda::GpuMat abs_g(rows_, cols_, CV_32FC1, abs_g_data);
+    cv::Point2i minLoc, maxLoc;
+    double minMaxVals[2];
+    cv::cuda::minMaxLoc(abs_g, &minMaxVals[0], &minMaxVals[1], &minLoc, &maxLoc);
+
+    if (debug) {
+        cv::Mat abs_h;
+        abs_g.download(abs_h);
+        float *abs_h_data = abs_h.ptr<float>();
+        std::cout << "abs_h data:\n";
+        for(int i=0;i<5;i++) {
+            for(int j=0;j<5;j++) {
+                std::cout << abs_h_data[i*cols_+j] << ", ";
+            }
+            std::cout << "\n";
+        }
+
+        std::cout << "minVal, maxVal: " << minMaxVals[0] << ", " << minMaxVals[1] << "\n";
+        std::cout << "loc_h: " << minLoc << ", " << maxLoc << "\n";
+    }
+
+    // neibghborhood
+    cv::Mat abs_h;
+    abs_g.download(abs_h);
+    int radius = 2;
+    int size = 1 + 2*radius;
+    int row_start = maxLoc.y - radius;
+    int row_end = maxLoc.y + radius;
+    int col_start = maxLoc.x - radius;
+    int col_end = maxLoc.x + radius;
+    cv::Range rowRange(maxLoc.y - radius, maxLoc.y + radius);
+    cv::Range colRange(maxLoc.x - radius, maxLoc.x + radius);
+
+
+    cudaFree(im0_g_c);
+    cudaFree(im1_g_c);
+    cudaFree(im0_g_c_o);
+    cudaFree(im1_g_c_o);
+    cudaFree(abs_g_data);
+    cufftDestroy(plan);
+}
+
 void fft_image_registration(int argc, char** argv) {
     bool debug = true;
     cv::Mat im0 = cv::imread("F:/cuda-samples/Samples/testNPP/test_opencv/img_000002.png", cv::IMREAD_COLOR);
@@ -804,7 +898,7 @@ void fft_image_registration(int argc, char** argv) {
         }
     }
 
-    double angle_step = CV_PI / static_cast<double>(logPolarrows_);
+    double angle_step = CV_PI / static_cast<double>(logPolarrows_-1);
     float *angles_matrix = new float[logPolarrows_*logPolarcols_];
     for (int i = 0; i < logPolarrows_; i++) {
         //memset(&angles_matrix[i*logPolarcols_], -i*angle_step, logPolarcols_*sizeof(float));  // this is bad
@@ -848,6 +942,8 @@ void fft_image_registration(int argc, char** argv) {
         }
     }
 
+    float* highPassFilter = getHighPassFilter(rows_, cols_);
+
     if (false) {
         cv::Mat apodize0 = gray0f.mul(appodizationWindow);
         cv::Mat apodize1 = gray1f.mul(appodizationWindow);
@@ -884,26 +980,31 @@ void fft_image_registration(int argc, char** argv) {
 
         //先测试对apodize0_g进行傅里叶变换
         //cv::Mat apodize0_copy = cv::Mat::zeros(rows_, cols_, CV_32FC1);
-        float* data_ptr_d = apodize0_g.ptr<float>();
+        float* data_ptr_d0 = apodize0_g.ptr<float>();
+        float* data_ptr_d1 = apodize1_g.ptr<float>();
         //float* data_ptr_h = apodize0_copy.ptr<float>();
-        //cudaMemcpy(data_ptr_h, data_ptr_d, rows_*cols_*sizeof(float), cudaMemcpyDeviceToHost);
-        cufftDoubleComplex *apodize0_g_c;
-        cufftDoubleComplex *apodize0_g_c_o; // 傅里叶变换的输出
+        //cudaMemcpy(data_ptr_h, data_ptr_d0, rows_*cols_*sizeof(float), cudaMemcpyDeviceToHost);
+        cufftDoubleComplex *apodize0_g_c, *apodize1_g_c;
+        cufftDoubleComplex *apodize0_g_c_o, *apodize1_g_c_o; // 傅里叶变换的输出
         cudaMalloc((void**)&apodize0_g_c, sizeof(cufftDoubleComplex)*rows_*cols_);
         cudaMalloc((void**)&apodize0_g_c_o, sizeof(cufftDoubleComplex)*rows_*cols_);
-        cufftDoubleComplex *apodize0_g_c_o_h = new cufftDoubleComplex[rows_*cols_]; // 傅里叶变换的输出的Host端存储
-        copy_R2C(data_ptr_d, apodize0_g_c, rows_*cols_); //复制到complex数据里面 GPU端
-//        for(int i=0; i<rows_;i++) {
-//            for(int j=0;j<cols_;j++) {
-//                apodize0_g_c_o_h[i*cols_+j].x = static_cast<double>(data_ptr_h[i*cols_+j]);
-//                apodize0_g_c_o_h[i*cols_+j].y = 0.0;
-//            }
-//        }
-//        cudaMemcpy(apodize0_g_c, apodize0_g_c_o_h, sizeof(cufftDoubleComplex)*rows_*cols_, cudaMemcpyHostToDevice);
+        cudaMalloc((void**)&apodize1_g_c, sizeof(cufftDoubleComplex)*rows_*cols_);
+        cudaMalloc((void**)&apodize1_g_c_o, sizeof(cufftDoubleComplex)*rows_*cols_);
+        cufftDoubleComplex *apodize0_g_c_o_h = new cufftDoubleComplex[rows_*cols_]; // 傅里叶变换的输出的Host端存储，用于debug
+        copy_R2C(data_ptr_d0, apodize0_g_c, rows_*cols_); //复制到complex数据里面 GPU端
+        copy_R2C(data_ptr_d1, apodize1_g_c, rows_*cols_); //复制到complex数据里面 GPU端
+        //        for(int i=0; i<rows_;i++) {
+        //            for(int j=0;j<cols_;j++) {
+        //                apodize0_g_c_o_h[i*cols_+j].x = static_cast<double>(data_ptr_h[i*cols_+j]);
+        //                apodize0_g_c_o_h[i*cols_+j].y = 0.0;
+        //            }
+        //        }
+        //        cudaMemcpy(apodize0_g_c, apodize0_g_c_o_h, sizeof(cufftDoubleComplex)*rows_*cols_, cudaMemcpyHostToDevice);
 
         cufftHandle plan;
         cufftPlan2d(&plan, rows_, cols_, CUFFT_Z2Z);
-        cufftExecZ2Z(plan, apodize0_g_c, apodize0_g_c_o, CUFFT_FORWARD);
+        cufftExecZ2Z(plan, apodize0_g_c, apodize0_g_c_o, CUFFT_FORWARD);//执行FFT
+        cufftExecZ2Z(plan, apodize1_g_c, apodize1_g_c_o, CUFFT_FORWARD);//执行FFT
 
         if (debug){
             cudaMemcpy(apodize0_g_c_o_h, apodize0_g_c_o, sizeof(cufftDoubleComplex)*rows_*cols_, cudaMemcpyDeviceToHost);
@@ -928,8 +1029,8 @@ void fft_image_registration(int argc, char** argv) {
         }
 
         //这里执行fftshift
-        //fftshift_2D(apodize0_g_c_o, cols_, rows_);
-        fftshift_2D_new(apodize0_g_c_o, cols_, rows_);  // OK
+        fftshift_2D(apodize0_g_c_o, cols_, rows_);  // OK
+        fftshift_2D(apodize1_g_c_o, cols_, rows_);  // OK
 
         int block_rows = rows_/2;
         int block_cols = cols_/2;
@@ -954,16 +1055,118 @@ void fft_image_registration(int argc, char** argv) {
                 fprintf(fp, "\n");
             }
             fclose(fp);
+
+            //
+            fp = fopen("highPassFilter.txt", "w");
+            for(int i=0; i<rows_;i++) {
+                for(int j=0; j<cols_;j++) {
+                    fprintf(fp, "%.6f, ", highPassFilter[i*cols_+j]);
+                }
+                fprintf(fp, "\n");
+            }
+            fclose(fp);
+
+            std::cout << "fftshift * highpass result is: \n";
+            for(int i=0; i<5;i++) {
+                for(int j=0;j<5;j++) {
+                    const cufftDoubleComplex& temp = apodize0_g_c_o_h[i*cols_+j];
+                    double x = temp.x * highPassFilter[i*cols_+j];
+                    double y = temp.y * highPassFilter[i*cols_+j];
+                    x = sqrt(x*x+y*y);
+
+                    std::cout << x << ", ";
+                }
+                std::cout << "\n";
+            }
         }
+
+        // fftshift之后的数据，再乘以highPassFilter
+        float *im0_dft_g_data, *im1_dft_g_data;
+        cudaMalloc((void**)&im0_dft_g_data, sizeof(float)*rows_*cols_);
+        cudaMalloc((void**)&im1_dft_g_data, sizeof(float)*rows_*cols_);
+        high_pass_filtering(apodize0_g_c_o, im0_dft_g_data, cols_, rows_);
+        high_pass_filtering(apodize1_g_c_o, im1_dft_g_data, cols_, rows_);
+
+        if (debug) {
+            float *im0_dft_h = new float[rows_ * cols_];
+            cudaMemcpy(im0_dft_h, im0_dft_g_data, sizeof(float)*rows_*cols_, cudaMemcpyDeviceToHost);
+            std::cout << "download data from gpu\n";
+            //cv::Mat im0_dft_h;
+            //cv::cuda::GpuMat im0_dft_g(rows_, cols_, CV_32F);
+            // cudaMemcpy(im0_dft_g.ptr<float>(), im0_dft_g_data, sizeof(float)*rows_*cols_, cudaMemcpyDeviceToDevice);
+            //im0_dft_g.download(im0_dft_h);
+            //float *im0_dft_h_data = im0_dft_h.ptr<float>();
+
+            std::cout << "apodize0 after high pass filtering: \n";
+            for(int i=0; i<5;i++) {
+                for(int j=0; j<5;j++) {
+                     //std::cout << im0_dft_h_data[i*cols_+j] << ", ";
+                    std::cout << im0_dft_h[i*cols_+j] << ", ";
+                }
+                std::cout << "\n";
+            }
+
+            delete[] im0_dft_h;
+        }
+
+        if (debug) {
+            cv::Mat im0_dft_h;
+            cv::cuda::GpuMat im0_dft_g(rows_, cols_, CV_32F, im0_dft_g_data);
+            im0_dft_g.download(im0_dft_h);
+
+            float *im0_dft_h_data = im0_dft_h.ptr<float>();
+            std::cout << "apodize0 after high pass filtering using GpuMat: \n";
+            for(int i=0; i<5;i++) {
+                for(int j=0; j<5;j++) {
+                    std::cout << im0_dft_h_data[i*cols_+j] << ", ";
+                }
+                std::cout << "\n";
+            }
+        }
+
+        //cv::remap(src, dst, cv_xMap, cv_yMap, cv::INTER_CUBIC & cv::INTER_MAX, cv::BORDER_CONSTANT, cv::Scalar());
+        cv::cuda::GpuMat im0_dft_g(rows_, cols_, CV_32F, im0_dft_g_data);
+        cv::cuda::GpuMat im1_dft_g(rows_, cols_, CV_32F, im1_dft_g_data);
+        cv::cuda::GpuMat im0_log_polar_g(logPolarrows_, logPolarcols_, CV_32FC1);
+        cv::cuda::GpuMat im1_log_polar_g(logPolarrows_, logPolarcols_, CV_32FC1);
+        cv::Mat xMap_h(logPolarrows_, logPolarcols_, CV_32FC1, xMap);
+        cv::Mat yMap_h(logPolarrows_, logPolarcols_, CV_32FC1, yMap);
+        cv::cuda::GpuMat xMap_g, yMap_g;
+        xMap_g.upload(xMap_h);
+        yMap_g.upload(yMap_h);
+        cv::cuda::remap(im0_dft_g, im0_log_polar_g, xMap_g, yMap_g, cv::INTER_CUBIC & cv::INTER_MAX, cv::BORDER_CONSTANT, cv::Scalar());
+        cv::cuda::remap(im1_dft_g, im1_log_polar_g, xMap_g, yMap_g, cv::INTER_CUBIC & cv::INTER_MAX, cv::BORDER_CONSTANT, cv::Scalar());
+
+        if (debug) {
+            cv::Mat im0_log_polar_h, im1_log_polar_h;
+            im0_log_polar_g.download(im0_log_polar_h);
+            im1_log_polar_g.download(im1_log_polar_h);
+            float *im0_log_polar_h_data = im0_log_polar_h.ptr<float>();
+            std::cout << "im0_log_polar_h_data: \n";
+            for(int i=0; i<5;i++) {
+                for(int j=0; j<5;j++) {
+                    std::cout << im0_log_polar_h_data[i*cols_+j] << ", ";
+                }
+                std::cout << "\n";
+            }
+            showImg(im0_log_polar_h, "im0_log_polar_h");
+            showImg(im1_log_polar_h, "im1_log_polar_h");
+        }
+
+        double rs_row, rs_col;
+        double t_row, t_col;
+        double scale, rotation;
+        fftreg_phaseCorrelate(im0_log_polar_g, im1_log_polar_g, rs_row, rs_col);
 
         delete[] apodize0_g_c_o_h;
         cudaFree(apodize0_g_c);
         cudaFree(apodize0_g_c_o);
+        cudaFree(apodize1_g_c);
+        cudaFree(apodize1_g_c_o);
         cufftDestroy(plan);
-
+        cudaFree(im0_dft_g_data);
+        cudaFree(im1_dft_g_data);
     }
-
-    float* highPassFilter = getHighPassFilter(rows_, cols_);
 
     if (debug){
         std::cout << "highPassFilter: \n";
@@ -998,6 +1201,35 @@ void test_eigen() {
     A(1, 1) = std::complex<double>(4.0, 4.0);
     std::cout << A << "\n";
     std::cout << A.cwiseAbs() << "\n";  //如果是complex，则是求sqrt(x.^2 + y.^2)
+
+    Eigen::MatrixXd B(2, 2);
+    B(0, 0) = 1.0;
+    B(0, 1) = 2.0;
+    B(1, 0) = 3.0;
+    B(1, 1) = 4.0;
+    std::cout << B << "\n";
+    ComplexMatrix result = A.cwiseProduct(B);  //如果是一个Complex矩阵和一个普通矩阵相乘，则实部和虚部都会相乘
+    std::cout << "result of A.cwiseProduct(B) is " << result << "\n";
+    std::cout << result.cwiseAbs() << "\n";
+
+    ComplexMatrix C(2, 2);
+    C(0, 0) = std::complex<double>(1.0, 2.0);
+    C(0, 1) = std::complex<double>(2.0, 3.0);
+    C(1, 0) = std::complex<double>(3.0, 4.0);
+    C(1, 1) = std::complex<double>(4.0, 5.0);
+
+    std::cout << "A" << A << "\n";
+    std::cout << "C" << C << "\n";
+    std::cout << "C conjugate" << C.conjugate() << "\n";
+
+    ComplexMatrix D = A.cwiseProduct(C.conjugate());
+    std::cout << D << "\n";
+
+    Eigen::MatrixXd Dabs = D.cwiseAbs();
+    std::cout << "Dabs" << Dabs << "\n";
+    int row, col;
+    std::cout << Dabs.maxCoeff(&row, &col) << "\n";
+    std::cout << row << ", " << col << "\n";
 }
 
 
@@ -1075,7 +1307,7 @@ int main(int argc, char** argv){
         fft_image_registration(argc, argv);
     }
 
-    if (false) { //测试Eigen
+    if (true) { //测试Eigen
         test_eigen();
     }
 
