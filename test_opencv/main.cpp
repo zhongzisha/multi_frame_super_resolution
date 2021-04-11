@@ -9,6 +9,7 @@ using namespace std;
 #include <opencv2/superres.hpp>
 #include <opencv2/cudawarping.hpp>
 #include <opencv2/cudaarithm.hpp>
+#include <opencv2/cudafilters.hpp>
 
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
@@ -1232,6 +1233,47 @@ void test_eigen() {
     std::cout << row << ", " << col << "\n";
 }
 
+void dark_prior(cv::cuda::GpuMat &gpuimg, int radius, cv::cuda::GpuMat &dark_prior)
+{
+    int win_size = 2 * radius + 1;
+    cv::cuda::GpuMat gpuimg_splitted[3];
+    cv::cuda::GpuMat temp1, temp2;
+
+    //GpuMat dark_prior;
+    cv::cuda::GpuMat kernel((win_size, win_size), 1);
+
+    cv::cuda::split(gpuimg, gpuimg_splitted);
+    cv::cuda::min(gpuimg_splitted[0], gpuimg_splitted[1], temp1);
+    cv::cuda::min(gpuimg_splitted[2], temp1, temp2);
+    cv::Ptr<cv::cuda::Filter>minfilter =
+            cv::cuda::createMorphologyFilter(cv::MORPH_ERODE, kernel, iterations = 1);
+    minfilter->apply(temp2, dark_prior);
+
+}
+void test_defog() {
+    cv::Mat Iper = cv::imread("", cv::IMREAD_COLOR);
+    cv::Mat Ipar = cv::imread("", cv::IMREAD_COLOR);
+    Iper.convertTo(Iper, CV_32FC3, 1/65535.0);
+    Ipar.convertTo(Ipar, CV_32FC3, 1/65535.0);
+    cv::cuda::GpuMat Iper_g, Ipar_g;
+    Iper_g.upload(Iper);
+    Ipar_g.upload(Ipar);
+
+    cv::cuda::GpuMat Iper_dc_g;
+    cv::cuda::GpuMat Ipar_dc_g;
+    dark_prior(Iper_g, 24, Iper_dc_g);
+    dark_prior(Ipar_g, 24, Ipar_dc_g);
+
+    cv::Mat Iper_dc, Ipar_dc;
+    Iper_dc_g.download(Iper_dc);
+    Ipar_dc_g.download(Ipar_dc);
+
+    showImg(Iper_dc, "Iper_dc");
+    showImg(Ipar_dc, "Ipar_dc");
+
+
+}
+
 
 
 int main(int argc, char** argv){
@@ -1303,12 +1345,16 @@ int main(int argc, char** argv){
         cv_mfsr(argc, argv);
     }
 
-    if (true) { // FFT的图像配准
+    if (false) { // FFT的图像配准
         fft_image_registration(argc, argv);
     }
 
-    if (true) { //测试Eigen
+    if (false) { //测试Eigen
         test_eigen();
+    }
+
+    if (true) {// 去雾
+        test_defog();
     }
 
     return 0;
