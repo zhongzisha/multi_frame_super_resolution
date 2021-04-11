@@ -1101,7 +1101,7 @@ void fft_image_registration(int argc, char** argv) {
             std::cout << "apodize0 after high pass filtering: \n";
             for(int i=0; i<5;i++) {
                 for(int j=0; j<5;j++) {
-                     //std::cout << im0_dft_h_data[i*cols_+j] << ", ";
+                    //std::cout << im0_dft_h_data[i*cols_+j] << ", ";
                     std::cout << im0_dft_h[i*cols_+j] << ", ";
                 }
                 std::cout << "\n";
@@ -1240,38 +1240,139 @@ void dark_prior(cv::cuda::GpuMat &gpuimg, int radius, cv::cuda::GpuMat &dark_pri
     cv::cuda::GpuMat temp1, temp2;
 
     //GpuMat dark_prior;
-    cv::cuda::GpuMat kernel((win_size, win_size), 1);
+    const cv::Mat kernel =
+            cv::getStructuringElement(cv::MORPH_RECT, cv::Size(win_size, win_size));
 
     cv::cuda::split(gpuimg, gpuimg_splitted);
     cv::cuda::min(gpuimg_splitted[0], gpuimg_splitted[1], temp1);
     cv::cuda::min(gpuimg_splitted[2], temp1, temp2);
     cv::Ptr<cv::cuda::Filter>minfilter =
-            cv::cuda::createMorphologyFilter(cv::MORPH_ERODE, kernel, iterations = 1);
+            cv::cuda::createMorphologyFilter(cv::MORPH_ERODE, CV_32FC1, kernel);
     minfilter->apply(temp2, dark_prior);
 
 }
+
+void sum_by_indices(float *in, int *indices, int size, int width, int height, int channels,
+                    float *out) {
+    // out为RGB数组
+    int row, col;
+    for(int index=0;index<size;index++) {
+        row = indices[index]/width;
+        col = indices[index]%width;
+        for(int c=0;c<channels;c++){
+            out[c] += in[row*width*channels+col*channels+c];
+        }
+    }
+}
 void test_defog() {
-    cv::Mat Iper = cv::imread("", cv::IMREAD_COLOR);
-    cv::Mat Ipar = cv::imread("", cv::IMREAD_COLOR);
-    Iper.convertTo(Iper, CV_32FC3, 1/65535.0);
-    Ipar.convertTo(Ipar, CV_32FC3, 1/65535.0);
-    cv::cuda::GpuMat Iper_g, Ipar_g;
-    Iper_g.upload(Iper);
-    Ipar_g.upload(Ipar);
-
-    cv::cuda::GpuMat Iper_dc_g;
-    cv::cuda::GpuMat Ipar_dc_g;
-    dark_prior(Iper_g, 24, Iper_dc_g);
-    dark_prior(Ipar_g, 24, Ipar_dc_g);
-
-    cv::Mat Iper_dc, Ipar_dc;
-    Iper_dc_g.download(Iper_dc);
-    Ipar_dc_g.download(Ipar_dc);
-
-    showImg(Iper_dc, "Iper_dc");
-    showImg(Ipar_dc, "Ipar_dc");
+    bool debug = false;
 
 
+    cv::Mat Iper = cv::imread("F:/wy/ImageWorst_tiff16.tiff", cv::IMREAD_ANYCOLOR|cv::IMREAD_ANYDEPTH);
+    cv::Mat Ipar = cv::imread("F:/wy/ImageBest_tiff16.tiff", cv::IMREAD_ANYCOLOR|cv::IMREAD_ANYDEPTH);
+    int num_images = 16;
+    cv::TickMeter tm;
+    tm.start();
+    for(int image_id=0; image_id<num_images; image_id++) {
+        Iper.convertTo(Iper, CV_32FC3, 1/65535.0);
+        Ipar.convertTo(Ipar, CV_32FC3, 1/65535.0);
+        cv::cuda::GpuMat Iper_g;
+        Iper_g.upload(Iper);
+        //Ipar_g.upload(Ipar);
+
+        cv::cuda::GpuMat Iper_dc_g;
+        //cv::cuda::GpuMat Ipar_dc_g;
+        dark_prior(Iper_g, 12, Iper_dc_g);
+        //dark_prior(Ipar_g, 12, Ipar_dc_g);
+
+        cv::Mat Iper_dc;
+        Iper_dc_g.download(Iper_dc);
+        //Ipar_dc_g.download(Ipar_dc);
+
+        if (debug) {
+            showImg(Iper_dc, "Iper_dc");
+            //showImg(Ipar_dc, "Ipar_dc");
+        }
+
+        if (debug) {
+            float *Iper_dc_ptr = Iper_dc.ptr<float>();
+            FILE *fp = fopen("Iper_dc.txt", "w");
+            for(int i=0; i<Iper_dc.rows; i++) {
+                for(int j=0; j<Iper_dc.cols;j++) {
+                    fprintf(fp, "%.6f, ", Iper_dc_ptr[i*Iper_dc.cols+j]);
+                }
+                fprintf(fp, "\n");
+            }
+            fclose(fp);
+        }
+
+        float percent = 0.005;
+        int rows = Iper.rows;
+        int cols = Iper.cols;
+        int num_pixels = percent * rows * cols;
+        //std::cout << "num_pixels = " << num_pixels << "\n";
+        cv::Mat dark_temp = Iper_dc.reshape(1, 1); //一行的矩阵
+        cv::Mat Idx;
+        cv::sortIdx(dark_temp, Idx, cv::SORT_EVERY_ROW + cv::SORT_DESCENDING);
+        int *Idx_ptr = Idx.ptr<int>();
+
+        if (debug) {
+            cv::Mat mask = cv::Mat::zeros(rows, cols, CV_32FC1);
+            std::cout << Idx.type() << "\n";
+
+            float* mask_ptr = mask.ptr<float>();
+            for(int i=0; i<num_pixels;i++) {
+                int row = Idx_ptr[i]/cols;
+                int col = Idx_ptr[i]%cols;
+                mask_ptr[row*cols+col] = 1;
+                std::cout << i << ": " << Idx_ptr[i] << "\n";
+            }
+            showImg(mask, "mask");
+        }
+
+        float *Iper_ptr = Iper.ptr<float>();
+        float *Ipar_ptr = Ipar.ptr<float>();
+        float Iper_infi_sum[3] = {0};
+        float Ipar_infi_sum[3] = {0};
+        sum_by_indices(Iper_ptr, Idx_ptr, num_pixels, cols, rows, 3, Iper_infi_sum);
+        sum_by_indices(Ipar_ptr, Idx_ptr, num_pixels, cols, rows, 3, Ipar_infi_sum);
+
+        float beta = 1.55f;
+        float P[3], Ainfi[3];
+        for(int i=0; i<3;i++) {
+            P[i] = beta * (Iper_infi_sum[i] - Ipar_infi_sum[i]) / (Iper_infi_sum[i] + Ipar_infi_sum[i]);
+            Ainfi[i] = (Iper_infi_sum[i] + Ipar_infi_sum[i]) / num_pixels;
+        }
+
+
+        cv::Mat Iper_vec[3], Ipar_vec[3], Itotal[3];
+        cv::split(Iper, Iper_vec);
+        cv::split(Ipar, Ipar_vec);
+        std::vector<cv::Mat> A_vec(3), t_vec(3), R_vec(3);
+        for (int i=0; i<3; i++) {
+            A_vec[i] = (Iper_vec[i] - Ipar_vec[i])/P[i];
+            Itotal[i] = Iper_vec[i] + Ipar_vec[i];
+            t_vec[i] = 1.0 - A_vec[i] / Ainfi[i];
+            R_vec[i] = (Itotal[i] - A_vec[i]) / t_vec[i];
+        }
+        cv::Mat A, t, R;
+        cv::merge(A_vec, A);
+        cv::merge(t_vec, t);
+        cv::merge(R_vec, R);
+
+        if (debug) {
+            std::cout << Iper_infi_sum[0] << ", " << Iper_infi_sum[1] << ", " << Iper_infi_sum[2] << "\n";
+            std::cout << Ipar_infi_sum[0] << ", " << Ipar_infi_sum[1] << ", " << Ipar_infi_sum[2] << "\n";
+            std::cout << P[0] << ", " << P[1] << ", " << P[2] << "\n";
+            std::cout << Ainfi[0] << ", " << Ainfi[1] << ", " << Ainfi[2] << "\n";
+            showImg(A, "A");
+            showImg(t, "t");
+            showImg(R, "R");
+        }
+    }
+    tm.stop();
+    std::cout << tm.getTimeSec() << " sec" << std::endl;
+    std::cout << static_cast<double>(num_images) / tm.getTimeSec() << " FPS" << std::endl;
 }
 
 
