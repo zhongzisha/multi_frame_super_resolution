@@ -15,7 +15,7 @@ set COMMON_INSTALL="F:/softwares/install/"
 
 set NPP_LIBS="%CUDA_PATH%/lib/x64/nppc.lib" "%CUDA_PATH%/lib/x64/nppial.lib" "%CUDA_PATH%/lib/x64/nppicc.lib" "%CUDA_PATH%/lib/x64/nppidei.lib" "%CUDA_PATH%/lib/x64/nppif.lib" "%CUDA_PATH%/lib/x64/nppig.lib" "%CUDA_PATH%/lib/x64/nppim.lib" "%CUDA_PATH%/lib/x64/nppist.lib" "%CUDA_PATH%/lib/x64/nppisu.lib" "%CUDA_PATH%/lib/x64/nppitc.lib" "%CUDA_PATH%/lib/x64/npps.lib"
 
-cl -I "%COMMON_INSTALL%/include" ^
+cl /std:c17 -I "%COMMON_INSTALL%/include" ^
 -I "%COMMON_INSTALL%/include/eigen3" ^
 -I "%OPENCV_PATH%/include" ^
 -I "%CUDA_PATH%/include" ^
